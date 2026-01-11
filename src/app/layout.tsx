@@ -23,8 +23,24 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const publishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+  
+  // Validate publishable key format
+  if (!publishableKey) {
+    throw new Error(
+      "Missing NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY. Please set it in your environment variables."
+    );
+  }
+  
+  if (!publishableKey.startsWith("pk_test_") && !publishableKey.startsWith("pk_live_")) {
+    throw new Error(
+      `Invalid NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY format. Expected to start with "pk_test_" or "pk_live_", got: ${publishableKey.substring(0, 20)}...`
+    );
+  }
+
   return (
     <ClerkProvider
+      publishableKey={publishableKey}
       signInUrl="/sign-in"
       signUpUrl="/sign-up"
       afterSignInUrl="/dashboard"
