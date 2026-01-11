@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "I-539 Cover Letter Schema",
+  "type": "object",
+  "properties": {
+    "applicant_address_line1": {
+      "type": "string",
+      "description": "First line of applicant's U.S. address"
+    },
+    "applicant_address_line2": {
+      "type": "string",
+      "description": "Second line of applicant's U.S. address (optional)"
+    },
+    "applicant_city_state_zip": {
+      "type": "string",
+      "description": "City, state, and ZIP code"
+    },
+    "date": {
+      "type": "string",
+      "description": "Date of letter (e.g., 'December 18, 2025')"
+    },
+    "uscis_address_line1": {
+      "type": "string",
+      "description": "U.S. Citizenship and Immigration Services"
+    },
+    "uscis_address_line2": {
+      "type": "string",
+      "description": "USCIS P.O. Box address"
+    },
+    "uscis_address_line3": {
+      "type": "string",
+      "description": "USCIS city and ZIP"
+    },
+    "entry_date": {
+      "type": "string",
+      "description": "Date of entry into United States"
+    },
+    "current_status": {
+      "type": "string",
+      "description": "Current nonimmigrant status (e.g., 'B-2')"
+    },
+    "requested_status": {
+      "type": "string",
+      "description": "Requested nonimmigrant status (e.g., 'F-1')"
+    },
+    "home_country": {
+      "type": "string",
+      "description": "Home country of applicant"
+    },
+    "ina_section": {
+      "type": "string",
+      "description": "INA section number (e.g., '248')"
+    },
+    "cfr_section": {
+      "type": "string",
+      "description": "CFR section reference (e.g., '8 C.F.R. § 248.1')"
+    },
+    "maintenance_cfr_reference": {
+      "type": "string",
+      "description": "CFR reference for maintenance of status"
+    },
+    "intent_cfr_reference": {
+      "type": "string",
+      "description": "CFR reference for nonimmigrant intent"
+    },
+    "financial_cfr_reference": {
+      "type": "string",
+      "description": "CFR reference for financial capacity"
+    },
+    "personal_funds_usd": {
+      "type": "string",
+      "description": "Personal funds amount (e.g., 'USD $15,000')"
+    },
+    "sponsor_name": {
+      "type": "string",
+      "description": "Name of financial sponsor (if applicable)"
+    },
+    "tuition_coverage_period": {
+      "type": "string",
+      "description": "Period covered by tuition payment (e.g., 'first 12 months')"
+    },
+    "signatory_name": {
+      "type": "string",
+      "description": "Name of person signing the letter"
+    },
+    "signatory_title": {
+      "type": "string",
+      "description": "Title of signatory (optional)"
+    },
+    "organization_name": {
+      "type": "string",
+      "description": "Organization name (optional)"
+    }
+  },
+  "required": [
+    "applicant_address_line1",
+    "applicant_city_state_zip",
+    "date",
+    "uscis_address_line1",
+    "uscis_address_line2",
+    "uscis_address_line3",
+    "entry_date",
+    "current_status",
+    "requested_status",
+    "home_country",
+    "ina_section",
+    "cfr_section",
+    "maintenance_cfr_reference",
+    "intent_cfr_reference",
+    "financial_cfr_reference",
+    "signatory_name"
+  ]
+}
+
