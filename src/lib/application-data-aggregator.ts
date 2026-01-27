@@ -75,6 +75,8 @@ export interface AggregatedApplicationData {
       gender?: string;
       issueDate?: string;
       expiryDate?: string;
+      /** Raw extracted_data para fallbacks (ex. fill-i539) */
+      extractedData?: Record<string, unknown>;
     };
     i94?: {
       name?: string;
@@ -302,13 +304,14 @@ export async function aggregateApplicationData(
               name: extractedData.name || (extractedData.first_name && extractedData.last_name 
                 ? `${extractedData.first_name} ${extractedData.last_name}` 
                 : undefined),
-              passportNumber: extractedData.passportNumber || extractedData.document_number,
+              passportNumber: extractedData.passportNumber || extractedData.passport_number || extractedData.document_number || (extractedData as any)?.doc_number || (extractedData as any)?.documentnumber || (extractedData as any)?.passport_no || (extractedData as any)?.passport_num,
               dateOfBirth: extractedData.dateOfBirth || extractedData.birthDate || extractedData.birth_date,
               placeOfBirth: extractedData.placeOfBirth || extractedData.place_of_birth,
               nationality: extractedData.nationality || extractedData.country_of_citizenship || extractedData.countryOfCitizenship,
               gender: extractedData.gender,
               issueDate: extractedData.issueDate || extractedData.issue_date,
-              expiryDate: extractedData.expiryDate || extractedData.expiry_date || extractedData.expirationDate,
+              expiryDate: extractedData.expiryDate || extractedData.expiry_date || extractedData.expirationDate || extractedData.expiration_date || (extractedData as any)?.date_of_expiry,
+              extractedData: extractedData as any,
             };
           }
           break;

@@ -7,6 +7,9 @@ import { aggregateApplicationData, AggregatedApplicationData } from "@/lib/appli
 import { LEGAL_CITATIONS } from "@/lib/constants/legal-citations";
 import { mergeShortParagraphs } from "@/lib/sizing/merge-short-paragraphs";
 import { sanitizeNationality, getCountryName, getCitizenshipAdjective } from "@/lib/utils/sanitize-nationality";
+import { extractFinancialData } from "@/lib/pdf/extractFinancialData";
+import { sanitizeForPdf } from "@/lib/pdf/sanitizeForPdf";
+import { renderCombinedPdfToBuffer } from "@/lib/pdf-templates/renderCombinedPdf";
 
 type DocumentType = 
   | "cover_letter"
@@ -963,8 +966,8 @@ function cleanMarkdownFormatting(text: string): string {
   // Remove markdown headers (# Header)
   cleaned = cleaned.replace(/^#{1,6}\s+/gm, "");
   
-  // Remove markdown code blocks
-  cleaned = cleaned.replace(/```[\s\S]*?```/g, "");
+  // Remove markdown code block fences but keep inner content (avoids wiping e.g. cover letter)
+  cleaned = cleaned.replace(/```(?:\w*\n)?([\s\S]*?)```/g, "$1");
   cleaned = cleaned.replace(/`([^`]+)`/g, "$1");
   
   // IMPORTANTE: Preservar quebras de linha, apenas limitar excesso
@@ -993,15 +996,13 @@ function removeSignatureFromCoverLetter(text: string): string {
   }
   
   if (signatureIndex >= 0) {
-    // Remove signature closing line and next line (name)
-    // Also remove any blank lines before signature
     let endIndex = signatureIndex;
-    // Remove trailing blank lines before signature
     while (endIndex > 0 && lines[endIndex - 1].trim() === "") {
       endIndex--;
     }
-    // Remove signature and name (next 2 lines)
-    return lines.slice(0, endIndex).join("\n").trim();
+    const kept = lines.slice(0, endIndex).join("\n").trim();
+    // Do not strip if it would remove the entire cover letter
+    if (kept.length > 0) return kept;
   }
   
   return text;
@@ -1015,7 +1016,7 @@ function ensureParagraphBreaks(text: string): string {
   if (!text) return "";
   
   // Se já tem quebras de linha adequadas (múltiplas linhas vazias ou quebras duplas), preservar
-  if (text.includes("\n\n") || text.split("\n").length > 5) {
+  if (text.includes("\n\n")) {
     return text;
   }
   
@@ -1033,6 +1034,37 @@ function ensureParagraphBreaks(text: string): string {
   formatted = formatted.replace(/\n{4,}/g, "\n\n\n");
   
   return formatted;
+}
+
+/**
+ * Format cover letter paragraphs while preserving the header block.
+ * Keeps existing paragraph structure but ensures clean double-newline separation.
+ */
+function formatCoverLetterParagraphs(text: string): string {
+  if (!text) return "";
+
+  const lines = text.split("\n");
+  const dearIndex = lines.findIndex((line) => /^dear\b/i.test(line.trim()));
+  if (dearIndex === -1) {
+    // No "Dear" line found, preserve original structure with paragraph breaks
+    return text;
+  }
+
+  // Keep header lines intact (everything up to and including "Dear Immigration Officer,")
+  const headerLines = lines.slice(0, dearIndex + 1).map((line) => line.trimEnd());
+  const bodyLines = lines.slice(dearIndex + 1);
+
+  // Simply ensure consistent paragraph breaks in the body (preserve AI-generated structure)
+  // Split by existing blank lines, trim each paragraph, then rejoin with double newlines
+  const bodyText = bodyLines.join("\n");
+  const paragraphs = bodyText
+    .split(/\n\s*\n+/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+
+  const formattedBody = paragraphs.join("\n\n");
+
+  return `${headerLines.join("\n")}\n\n${formattedBody}`.trim();
 }
 
 /**
@@ -1313,6 +1345,7 @@ function buildDataContext(
   
   // Financial Requirements Summary with Mathematical Validation
   context.push(`CRITICAL FINANCIAL REQUIREMENTS FOR F-1 STATUS:`);
+  context.push(`PDF FORMAT: When outputting the financial summary block, use EXACTLY these labels, one per line: "Financial Requirements:", "Tuition:", "Living Expenses:", "Total Required:", "Available Financial Resources:", "Personal funds:" (or "Personal Financial funds:"), "Financial sponsorship by [Name]:" if sponsor, "Total Available:". After the colon put ONLY "USD $X" on the same line. Do NOT put parentheticals like "(from I-20, Exhibit B)" on the same line as the value.`);
   context.push(`- USCIS requires demonstration of: TUITION + LIVING EXPENSES`);
   context.push(`- The I-20 (Exhibit B) shows the total financial support required`);
   if (i20Financial.totalRequired) {
@@ -5803,22 +5836,23 @@ Format as a formal business letter. The letter should be professional and demons
  * - "Exhibit A"
  * - "(Exhibit A)"
  * - "See Exhibit A"
- * - "Exhibit A:"
- * - "Exhibit A,"
- * - etc.
+ * - "Exhibit A:", "Exhibit A.", "Exhibit A,"
+ * - "Exhibit A and B" (matches A; B matched if "Exhibit B" appears)
+ * - Letters A–Z (not only A–J)
  */
 function extractExhibitsFromText(text: string): Set<string> {
-  // Pattern to match "Exhibit" followed by a letter (A-J) in various formats
-  // Matches: "Exhibit A", "(Exhibit A)", "See Exhibit A", "Exhibit A:", etc.
-  const exhibitPattern = /exhibit\s+([a-j])(?:\s*[:,\])]|$)/gi;
+  // Match "Exhibit" + letter (a–z) with optional trailing punctuation or " and "
+  const exhibitPattern = /exhibit\s+([a-z])(?:\s*[.,:\)\]]|\s+and\s|$)/gi;
   const matches = text.matchAll(exhibitPattern);
   const exhibits = new Set<string>();
-  
   for (const match of matches) {
-    const letter = match[1].toUpperCase();
-    exhibits.add(letter);
+    exhibits.add(match[1].toUpperCase());
   }
-  
+  // Also catch "Exhibit X and Y" for Y: e.g. "Exhibit A and B" -> need B
+  const andPattern = /exhibit\s+[a-z]\s+and\s+([a-z])(?:\s*[.,:\)\]]|$)/gi;
+  for (const m of text.matchAll(andPattern)) {
+    exhibits.add(m[1].toUpperCase());
+  }
   return exhibits;
 }
 
@@ -6033,6 +6067,52 @@ export async function getGeneratedDocuments(applicationId: string) {
 }
 
 /**
+ * Update the content of a generated document (e.g. after user edits in Tiptap).
+ * Updates the current version in place; does not create a new version.
+ */
+export async function updateGeneratedDocumentContent(
+  applicationId: string,
+  documentType: "cover_letter" | "personal_statement" | "exhibit_list",
+  content: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const user = await currentUser();
+    if (!user) {
+      return { success: false, error: "Not authenticated" };
+    }
+
+    const supabase = createAdminClient();
+
+    const { data: application, error: appError } = await (supabase
+      .from("applications") as any)
+      .select("user_id")
+      .eq("id", applicationId)
+      .single();
+
+    if (appError || !application || application.user_id !== user.id) {
+      return { success: false, error: "Application not found or unauthorized" };
+    }
+
+    const { error: updateError } = await (supabase
+      .from("generated_documents") as any)
+      .update({ content })
+      .eq("application_id", applicationId)
+      .eq("document_type", documentType)
+      .eq("is_current", true);
+
+    if (updateError) {
+      console.error("Error updating generated document:", updateError);
+      return { success: false, error: updateError.message };
+    }
+
+    return { success: true };
+  } catch (error: any) {
+    console.error("Error updating generated document content:", error);
+    return { success: false, error: error.message || "Failed to update document" };
+  }
+}
+
+/**
  * Generate PDF for cover letter using template-based system
  */
 export async function generateCoverLetterPdfAction(
@@ -6173,8 +6253,10 @@ export async function alignCoverLetterAndPersonalStatement(
       return { success: false, error: "Personal statement not found" };
     }
     
-    let coverLetter = (coverLetterDoc.document as any).content || "";
-    let personalStatement = (personalStatementDoc.document as any).content || "";
+    const rawCoverLetter = (coverLetterDoc.document as any).content || "";
+    const rawPersonalStatement = (personalStatementDoc.document as any).content || "";
+    let coverLetter = rawCoverLetter;
+    let personalStatement = rawPersonalStatement;
     
     // Clean both documents (remove markdown, emojis, etc.)
     coverLetter = cleanMarkdownFormatting(coverLetter);
@@ -6402,10 +6484,16 @@ function addExhibitFooter(
     color: lightBlue,
   });
   
-  // Draw exhibit name in footer (centered)
-  const exhibitTitle = `Exhibit ${exhibitLetter}: ${EXHIBIT_DESCRIPTIONS[exhibitLetter]}`;
-  const textWidth = fontBold.widthOfTextAtSize(exhibitTitle, 10);
-  const centerX = (612 - textWidth) / 2;
+  // Draw exhibit name in footer (centered); shorten if too long to avoid overflow
+  const fullTitle = `Exhibit ${exhibitLetter}: ${EXHIBIT_DESCRIPTIONS[exhibitLetter] || "Additional Supporting Documents"}`;
+  const maxFooterWidth = 612 - 60;
+  let exhibitTitle = fullTitle;
+  let textWidth = fontBold.widthOfTextAtSize(exhibitTitle, 10);
+  if (textWidth > maxFooterWidth) {
+    exhibitTitle = `Exhibit ${exhibitLetter}`;
+    textWidth = fontBold.widthOfTextAtSize(exhibitTitle, 10);
+  }
+  const centerX = Math.max(0, (612 - textWidth) / 2);
   
   page.drawText(exhibitTitle, {
     x: centerX,
@@ -6453,6 +6541,44 @@ async function downloadFileAsBytes(fileUrl: string): Promise<Uint8Array> {
 }
 
 /**
+ * Wrap text to fit max width using font measurement. Returns array of lines.
+ */
+function wrapTextForPdf(
+  text: string,
+  font: { widthOfTextAtSize: (t: string, s: number) => number },
+  fontSize: number,
+  maxWidth: number
+): string[] {
+  const words = text.split(/\s+/).filter((w) => w.length > 0);
+  const lines: string[] = [];
+  let current = "";
+  for (const w of words) {
+    const test = current ? current + " " + w : w;
+    if (font.widthOfTextAtSize(test, fontSize) <= maxWidth) {
+      current = test;
+    } else {
+      if (current) lines.push(current);
+      if (font.widthOfTextAtSize(w, fontSize) > maxWidth) {
+        let chunk = "";
+        for (const c of w) {
+          const t = chunk + c;
+          if (font.widthOfTextAtSize(t, fontSize) <= maxWidth) chunk = t;
+          else {
+            if (chunk) lines.push(chunk);
+            chunk = c;
+          }
+        }
+        current = chunk;
+      } else {
+        current = w;
+      }
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+/**
  * Add documents to PDF grouped by exhibit
  */
 async function addDocumentsToPdf(
@@ -6477,21 +6603,22 @@ async function addDocumentsToPdf(
       return;
     }
     
-    // Group documents by exhibit
-    const documentsByExhibit: Record<string, Array<{ id: string; type: string; name: string; file_url: string; mime_type: string }>> = {};
-    
+    // Build included exhibits: start from mentioned, add E when we have unmapped doc types
+    const includedExhibits = new Set(mentionedExhibits);
     for (const doc of documents) {
-      const docType = (doc as any).type;
-      const exhibitLetter = getExhibitForDocumentType(docType);
-      if (exhibitLetter && mentionedExhibits.has(exhibitLetter)) {
-        if (!documentsByExhibit[exhibitLetter]) {
-          documentsByExhibit[exhibitLetter] = [];
-        }
-        documentsByExhibit[exhibitLetter].push(doc);
-      }
+      if (!getExhibitForDocumentType((doc as any).type)) includedExhibits.add("E");
     }
     
-    // Sort exhibits alphabetically
+    // Group documents by exhibit (unmapped types go to Exhibit E)
+    const documentsByExhibit: Record<string, Array<{ id: string; type: string; name: string; file_url: string; mime_type: string }>> = {};
+    for (const doc of documents) {
+      const docType = (doc as any).type;
+      const exhibitLetter = getExhibitForDocumentType(docType) || "E";
+      if (!includedExhibits.has(exhibitLetter)) continue;
+      if (!documentsByExhibit[exhibitLetter]) documentsByExhibit[exhibitLetter] = [];
+      documentsByExhibit[exhibitLetter].push(doc);
+    }
+    
     const sortedExhibits = Object.keys(documentsByExhibit).sort();
     
     if (sortedExhibits.length === 0) {
@@ -6554,32 +6681,26 @@ async function addDocumentsToPdf(
         
         yPosition -= 20; // Space after subtitle
         
-        // Draw each item in the list
+        const listMaxWidth = 612 - 90 - 72; // page - left indent - right margin
+        // Draw each item in the list (wrap long lines to avoid overflow)
         for (const item of contentsDescription) {
-          // Check if we need a new page (leave space at bottom)
-          if (yPosition < 100) {
-            exhibitPage = pdfDoc.addPage([612, 792]);
-            headerPages.push(exhibitPage);
-            // Draw background on new page too
-            exhibitPage.drawRectangle({
-              x: 0,
-              y: 0,
-              width: 612,
-              height: 792,
-              color: lightBlue,
+          const itemLines = wrapTextForPdf(item, fontRegular, 11, listMaxWidth);
+          for (const line of itemLines) {
+            if (yPosition < 100) {
+              exhibitPage = pdfDoc.addPage([612, 792]);
+              headerPages.push(exhibitPage);
+              exhibitPage.drawRectangle({ x: 0, y: 0, width: 612, height: 792, color: lightBlue });
+              yPosition = 720;
+            }
+            exhibitPage.drawText(line, {
+              x: 90,
+              y: yPosition,
+              size: 11,
+              font: fontRegular,
+              color: rgbColor(0, 0, 0),
             });
-            yPosition = 720;
+            yPosition -= 16;
           }
-          
-          exhibitPage.drawText(item, {
-            x: 90, // Indented for bullet point
-            y: yPosition,
-            size: 11,
-            font: fontRegular,
-            color: rgbColor(0, 0, 0), // Black text
-          });
-          
-          yPosition -= 16; // Line height
         }
       }
       
@@ -6724,6 +6845,9 @@ export async function generateCombinedPdf(
     let coverLetter = (coverLetterDoc.document as any).content || "";
     let personalStatement = (personalStatementDoc.document as any).content || "";
     
+    // Store raw cover letter for fallback
+    const rawCoverLetter = coverLetter;
+    
     // Clean markdown formatting (preserva quebras de linha)
     coverLetter = cleanMarkdownFormatting(coverLetter);
     personalStatement = cleanMarkdownFormatting(personalStatement);
@@ -6736,73 +6860,81 @@ export async function generateCombinedPdf(
     
     // IMPORTANTE: Garantir que há quebras de linha entre parágrafos
     // Se o texto não tem quebras de linha adequadas, adicionar após pontos finais
-    coverLetter = ensureParagraphBreaks(coverLetter);
+    coverLetter = formatCoverLetterParagraphs(coverLetter);
     personalStatement = ensureParagraphBreaks(personalStatement);
     if (exhibitList) {
       exhibitList = ensureParagraphBreaks(exhibitList);
     }
-    
-    // Combine documents with clear separation
-    // Use fewer blank lines before "PERSONAL STATEMENT" to keep it on same page as content
-    const personalStatementSeparator = "\n\nPERSONAL STATEMENT\n\n";
-    
-    // Add signature directly after the last paragraph of personal statement (same page)
-    // Add some spacing but don't force a new page
-    const signature = "\n\n\n" + applicantName + "\n\n_________________________\nSignature";
-    
-    let combinedText = coverLetter.trim() + personalStatementSeparator + personalStatement.trim() + signature;
-    
-    // Add exhibit list after personal statement (with signature) if available
-    if (exhibitList) {
-      // Remove "EXHIBIT LIST" heading if it exists (we'll add our own)
-      let cleanedExhibitList = exhibitList.replace(/^EXHIBIT LIST\s*\n*/i, "").trim();
-      
-      // Remove "Generated: date" line if it exists
-      cleanedExhibitList = cleanedExhibitList.replace(/\n*Generated:.*$/i, "").trim();
-      
-      // Reformat exhibit list items for proper alignment
-      // Each exhibit should be on its own line with proper formatting
-      const exhibitLines = cleanedExhibitList.split("\n").filter(line => line.trim());
-      const reformattedExhibits: string[] = [];
-      
-      for (const line of exhibitLines) {
-        const trimmedLine = line.trim();
-        // Check if this line starts with "Exhibit"
-        if (/^Exhibit\s+[A-Z]:/.test(trimmedLine)) {
-          // This is an exhibit line - ensure it's properly formatted
-          // Format: "Exhibit X: Description" (all on one line, left-aligned)
-          // Make each exhibit a separate paragraph so it won't be justified
-          reformattedExhibits.push(trimmedLine);
-        } else if (trimmedLine.length > 0 && !/^Generated:/i.test(trimmedLine)) {
-          // This might be a continuation or other text - add it
-          // But skip "Generated:" lines as they're handled separately
-          reformattedExhibits.push(trimmedLine);
-        }
-      }
-      
-      // Join all exhibits with double newlines to make each a separate paragraph
-      // This ensures each exhibit is left-aligned and not justified
-      const formattedExhibitList = reformattedExhibits.join("\n\n");
-      
-      const exhibitListSeparator = "\n\nEXHIBIT LIST\n\n";
-      combinedText = combinedText + exhibitListSeparator + formattedExhibitList;
+
+    // Fallback: if cleaning stripped the cover letter entirely, keep the raw content
+    if (!coverLetter.trim() && rawCoverLetter.trim()) {
+      coverLetter = ensureParagraphBreaks(
+        removeSignatureFromCoverLetter(rawCoverLetter.trim())
+      );
     }
     
-    // NÃO chamar removeProblematicSymbols aqui - o PDF generator vai fazer a sanitização final
-    // Isso evita processamento duplo e preserva melhor a formatação
-    
-    // Normalizar espaços múltiplos mas preservar quebras de linha
-    let finalText = combinedText.replace(/[ \t]+/g, " "); // Normalize spaces but keep newlines
-    finalText = finalText.replace(/\n{4,}/g, "\n\n\n"); // Limit consecutive newlines to 3
-    
-    // Generate PDF using the existing USCIS PDF generator
-    // O gerador PDF vai fazer a sanitização final (removeProblematicSymbols + sanitizeForWinAnsi)
-    const { generateUSCISPdf } = await import("@/lib/uscis-writing-engine/pdf/generateUSCISPdf");
+    // Parse for React-PDF template (letterhead, cover, personal, exhibit, signature)
+    let c = coverLetter.trim();
+    if (/^COVER\s*LETTER\s*\n/i.test(c)) {
+      c = c.replace(/^COVER\s*LETTER\s*\n*/i, "").trim();
+    }
+    const lines = c.split("\n");
+    const dearIdx = lines.findIndex((l: string) => /^dear\b/i.test(l.trim()));
+    let coverHeader = "";
+    const coverBodyParagraphs: string[] = [];
+    let financial: { financialRequirements?: { tuition?: string; livingExpenses?: string; totalRequired?: string }; availableResources?: { personalFunds?: string; sponsorName?: string; sponsorAmount?: string; totalAvailable?: string } } | undefined;
+    if (dearIdx >= 0) {
+      coverHeader = lines.slice(0, dearIdx + 1).join("\n").trim();
+      const bodyText = lines.slice(dearIdx + 1).join("\n");
+      const paras = bodyText.split(/\n\n+/).map((p: string) => p.trim()).filter(Boolean);
+      for (const p of paras) {
+        const ext = extractFinancialData(p);
+        if (ext.isFinancialSection && (ext.financialRequirements || ext.availableResources)) {
+          financial = { financialRequirements: ext.financialRequirements, availableResources: ext.availableResources };
+        } else {
+          coverBodyParagraphs.push(p);
+        }
+      }
+    } else {
+      coverHeader = c;
+    }
+    const personalParagraphs = personalStatement.split(/\n\n+/).map((s: string) => s.trim()).filter(Boolean);
+    let cleanedExhibitList = exhibitList.replace(/^EXHIBIT LIST\s*\n*/i, "").trim();
+    cleanedExhibitList = cleanedExhibitList.replace(/\n*Generated:.*$/i, "").trim();
+    const exhibitLines = cleanedExhibitList.split("\n").filter((l: string) => l.trim());
+    const exhibitItems: string[] = [];
+    for (const line of exhibitLines) {
+      const t = line.trim();
+      if (/^Exhibit\s+[A-Z]:/.test(t) || (t.length > 0 && !/^Generated:/i.test(t))) {
+        exhibitItems.push(t);
+      }
+    }
+    // Sanitize all text for PDF to avoid garbled chars (•¤•Ÿ, etc.) from Unicode
+    const financialSanitized = financial
+      ? {
+          ...financial,
+          availableResources: financial.availableResources
+            ? {
+                ...financial.availableResources,
+                sponsorName: financial.availableResources.sponsorName
+                  ? sanitizeForPdf(financial.availableResources.sponsorName)
+                  : financial.availableResources.sponsorName,
+              }
+            : financial.availableResources,
+        }
+      : undefined;
+    const parsed = {
+      coverHeader: sanitizeForPdf(coverHeader),
+      coverBodyParagraphs: coverBodyParagraphs.map((p: string) => sanitizeForPdf(p)),
+      financial: financialSanitized,
+      personalParagraphs: personalParagraphs.map((p: string) => sanitizeForPdf(p)),
+      applicantName: sanitizeForPdf(applicantName),
+      exhibitItems: exhibitItems.map((i: string) => sanitizeForPdf(i)),
+    };
+
     const { PDFDocument } = await import("pdf-lib");
-    
-    console.log("[generateCombinedPdf] Starting PDF generation...");
-    // Skip signature in initial PDF since we're adding it manually after Personal Statement
-    const initialPdfBytes = await generateUSCISPdf(finalText, true);
+    console.log("[generateCombinedPdf] Starting PDF generation (React-PDF)...");
+    const initialPdfBytes = await renderCombinedPdfToBuffer(parsed);
     console.log("[generateCombinedPdf] Initial PDF generated successfully, size:", initialPdfBytes.length, "bytes");
     
     if (!initialPdfBytes || initialPdfBytes.length === 0) {
@@ -6816,22 +6948,22 @@ export async function generateCombinedPdf(
     const mentionedExhibits = new Set<string>();
     if (coverLetterDoc.success && coverLetterDoc.document) {
       const coverLetterContent = (coverLetterDoc.document as any).content || "";
-      const exhibits = extractExhibitsFromText(coverLetterContent);
-      exhibits.forEach(letter => mentionedExhibits.add(letter));
+      extractExhibitsFromText(coverLetterContent).forEach(letter => mentionedExhibits.add(letter));
     }
     if (personalStatementDoc.success && personalStatementDoc.document) {
       const personalStatementContent = (personalStatementDoc.document as any).content || "";
-      const exhibits = extractExhibitsFromText(personalStatementContent);
-      exhibits.forEach(letter => mentionedExhibits.add(letter));
+      extractExhibitsFromText(personalStatementContent).forEach(letter => mentionedExhibits.add(letter));
+    }
+    // Include exhibits from Exhibit List so docs are attached when only listed there
+    if (exhibitList) {
+      extractExhibitsFromText(exhibitList).forEach(letter => mentionedExhibits.add(letter));
     }
     
     console.log("[generateCombinedPdf] Mentioned exhibits:", Array.from(mentionedExhibits).sort());
     
-    // Add documents grouped by exhibit
-    if (mentionedExhibits.size > 0) {
-      console.log("[generateCombinedPdf] Adding documents to PDF...");
-      await addDocumentsToPdf(pdfDoc, applicationId, mentionedExhibits);
-    }
+    // Add documents grouped by exhibit (includes E for unmapped types when present)
+    console.log("[generateCombinedPdf] Adding documents to PDF...");
+    await addDocumentsToPdf(pdfDoc, applicationId, mentionedExhibits);
     
     // Save final PDF
     const finalPdfBytes = await pdfDoc.save();

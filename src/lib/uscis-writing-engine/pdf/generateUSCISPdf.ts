@@ -1,4 +1,5 @@
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { extractFinancialData } from "@/lib/pdf/extractFinancialData";
 
 const LETTER = { width: 612, height: 792 }; // US Letter size in points (8.5*72, 11*72)
 const MARGIN = 72; // 1 inch margin
@@ -209,6 +210,49 @@ function wrapTextToLines(
   return lines;
 }
 
+const MAX_LINES_PER_PARAGRAPH = 6;
+
+/**
+ * Count how many wrapped lines a paragraph would produce (same logic as main loop).
+ */
+function countWrappedLines(paragraph: string, font: any, fontSize: number, maxWidth: number): number {
+  return paragraph.split("\n").reduce((sum, line) => {
+    const t = line.trim();
+    return t ? sum + wrapTextToLines(sanitizeForWinAnsi(t), font, fontSize, maxWidth).length : sum;
+  }, 0);
+}
+
+/**
+ * Split a long paragraph at sentence boundaries so each chunk is at most ~maxLines when wrapped.
+ */
+function splitParagraphToMaxLines(
+  paragraph: string,
+  maxLines: number,
+  font: any,
+  fontSize: number,
+  maxWidth: number
+): string[] {
+  const body = paragraph.replace(/\n+/g, " ").trim();
+  const sentences = body.split(/(?<=[.!?])\s+(?=[A-Z])/).map((s) => s.trim()).filter(Boolean);
+  if (sentences.length <= 1) return [paragraph];
+  const result: string[] = [];
+  let current: string[] = [];
+  let currentLines = 0;
+  for (const s of sentences) {
+    const add = wrapTextToLines(sanitizeForWinAnsi(s), font, fontSize, maxWidth).length;
+    if (currentLines + add > maxLines && current.length > 0) {
+      result.push(current.join(" "));
+      current = [s];
+      currentLines = add;
+    } else {
+      current.push(s);
+      currentLines += add;
+    }
+  }
+  if (current.length) result.push(current.join(" "));
+  return result;
+}
+
 /**
  * Justify a line of text by adding spaces between words
  */
@@ -243,102 +287,6 @@ function justifyLine(
   }
   
   return justified;
-}
-
-/**
- * Extract financial data from text paragraph
- */
-function extractFinancialData(paragraph: string): {
-  isFinancialSection: boolean;
-  financialRequirements?: {
-    tuition?: string;
-    livingExpenses?: string;
-    totalRequired?: string;
-  };
-  availableResources?: {
-    personalFunds?: string;
-    sponsorName?: string;
-    sponsorAmount?: string;
-    totalAvailable?: string;
-  };
-} {
-  const text = paragraph.toLowerCase();
-  
-  // Check if this is a financial section with structured data
-  // Must have both "financial" keywords AND structured currency/amount patterns
-  const hasFinancialKeywords = 
-    text.includes("financial requirements") || 
-    text.includes("available financial resources");
-  
-  const hasStructuredData = 
-    text.includes("usd $") || 
-    (text.includes("tuition:") && text.includes("living expenses:"));
-  
-  const isFinancialSection = hasFinancialKeywords && hasStructuredData;
-  
-  if (!isFinancialSection) {
-    return { isFinancialSection: false };
-  }
-  
-  const result: {
-    isFinancialSection: boolean;
-    financialRequirements?: {
-      tuition?: string;
-      livingExpenses?: string;
-      totalRequired?: string;
-    };
-    availableResources?: {
-      personalFunds?: string;
-      sponsorName?: string;
-      sponsorAmount?: string;
-      totalAvailable?: string;
-    };
-  } = {
-    isFinancialSection: true,
-    financialRequirements: {},
-    availableResources: {}
-  };
-  
-  // Extract Financial Requirements
-  const tuitionMatch = paragraph.match(/tuition[:\s]*usd\s*\$?([\d,]+)/i) || 
-                       paragraph.match(/tuition[:\s]*\$?([\d,]+)/i);
-  if (tuitionMatch) {
-    result.financialRequirements!.tuition = tuitionMatch[1];
-  }
-  
-  const livingMatch = paragraph.match(/living\s+expenses[:\s]*usd\s*\$?([\d,]+)/i) ||
-                      paragraph.match(/living\s+expenses[:\s]*\$?([\d,]+)/i);
-  if (livingMatch) {
-    result.financialRequirements!.livingExpenses = livingMatch[1];
-  }
-  
-  const totalRequiredMatch = paragraph.match(/total\s+required[:\s]*usd\s*\$?([\d,]+)/i) ||
-                              paragraph.match(/total\s+required[:\s]*\$?([\d,]+)/i);
-  if (totalRequiredMatch) {
-    result.financialRequirements!.totalRequired = totalRequiredMatch[1];
-  }
-  
-  // Extract Available Resources
-  const personalFundsMatch = paragraph.match(/personal\s+funds[:\s]*usd\s*\$?([\d,.]+)/i) ||
-                             paragraph.match(/personal\s+funds[:\s]*\$?([\d,.]+)/i);
-  if (personalFundsMatch) {
-    result.availableResources!.personalFunds = personalFundsMatch[1];
-  }
-  
-  const sponsorMatch = paragraph.match(/financial\s+sponsorship\s+by\s+([^:]+):\s*usd\s*\$?([\d,.]+)/i) ||
-                       paragraph.match(/sponsor[:\s]*([^:]+)[:\s]*usd\s*\$?([\d,.]+)/i);
-  if (sponsorMatch) {
-    result.availableResources!.sponsorName = sponsorMatch[1].trim();
-    result.availableResources!.sponsorAmount = sponsorMatch[2];
-  }
-  
-  const totalAvailableMatch = paragraph.match(/total\s+available[:\s]*usd\s*\$?([\d,.]+)/i) ||
-                              paragraph.match(/total\s+available[:\s]*\$?([\d,.]+)/i);
-  if (totalAvailableMatch) {
-    result.availableResources!.totalAvailable = totalAvailableMatch[1];
-  }
-  
-  return result;
 }
 
 /**
@@ -650,10 +598,9 @@ export async function generateUSCISPdf(text: string, skipSignature: boolean = fa
   const sanitizedText = sanitizeForWinAnsi(text);
   
   // Split text into paragraphs (by double newlines) instead of single lines
-  // This allows us to track paragraph length and apply spacing rules
-  const paragraphs = sanitizedText.split(/\n\n+/).filter(p => p.trim());
+  let paragraphs = sanitizedText.split(/\n\n+/).filter(p => p.trim());
   
-  const MIN_LINES_PER_PARAGRAPH = 10; // Minimum lines before adding spacing between paragraphs
+  const MIN_LINES_FOR_JUSTIFY = 6; // Only justify paragraphs with enough lines
 
   // Helper function to detect if a paragraph is part of the header
   const isHeaderParagraph = (paragraph: string, paraIndex: number): boolean => {
@@ -688,6 +635,21 @@ export async function generateUSCISPdf(text: string, skipSignature: boolean = fa
     
     return false;
   };
+
+  // Expand long body paragraphs into chunks of ~6 lines (improves justify and spacing)
+  const expanded: string[] = [];
+  for (let i = 0; i < paragraphs.length; i++) {
+    const p = paragraphs[i];
+    if (i <= 5 && isHeaderParagraph(p, i)) { expanded.push(p); continue; }
+    if (extractFinancialData(p).isFinancialSection) { expanded.push(p); continue; }
+    const t = p.trim();
+    if (t === "COVER LETTER" || t === "PERSONAL STATEMENT" || t === "EXHIBIT LIST") { expanded.push(p); continue; }
+    const count = countWrappedLines(p, font, FONT_SIZE, maxWidth);
+    if (count <= MAX_LINES_PER_PARAGRAPH) { expanded.push(p); continue; }
+    const chunks = splitParagraphToMaxLines(p, MAX_LINES_PER_PARAGRAPH, font, FONT_SIZE, maxWidth);
+    expanded.push(...chunks);
+  }
+  paragraphs = expanded;
 
   for (let paraIndex = 0; paraIndex < paragraphs.length; paraIndex++) {
     const paragraph = paragraphs[paraIndex];
@@ -778,6 +740,7 @@ export async function generateUSCISPdf(text: string, skipSignature: boolean = fa
       if (line.trim() === "") continue;
       
       const isHeading = line.trim().startsWith("##") || 
+                       line.trim() === "COVER LETTER" ||
                        line.trim() === "PERSONAL STATEMENT" || 
                        line.trim() === "EXHIBIT LIST";
       const currentFont = isHeading ? fontBold : font;
@@ -792,16 +755,15 @@ export async function generateUSCISPdf(text: string, skipSignature: boolean = fa
     
     // Count total lines for this paragraph
     const paragraphLineCount = allWrappedLines.length;
+    const shouldJustifyParagraph = paragraphLineCount >= MIN_LINES_FOR_JUSTIFY;
     
-    // Special handling for "PERSONAL STATEMENT" or "EXHIBIT LIST" heading
+    // PERSONAL STATEMENT / EXHIBIT LIST: only force new page if in bottom 35% (reduces blank mid-page)
     if (isPersonalStatementHeading || isExhibitListHeading) {
-      const isAtTopOfPage = y >= LETTER.height - MARGIN - (LINE_HEIGHT * 2);
-      if (!isAtTopOfPage) {
+      const minYToStay = MARGIN + (LETTER.height - 2 * MARGIN) * 0.35;
+      if (y < minYToStay) {
         const newPage = pdfDoc.addPage([LETTER.width, LETTER.height]);
         pages.push(newPage);
         pageIndex++;
-        y = LETTER.height - MARGIN;
-      } else {
         y = LETTER.height - MARGIN;
       }
     }
@@ -820,16 +782,8 @@ export async function generateUSCISPdf(text: string, skipSignature: boolean = fa
         y = LETTER.height - MARGIN;
       }
       
-      // Final sanitization
-      let finalLine = sanitizeForWinAnsi(wrappedLine);
-      finalLine = finalLine.split('').map(char => {
-        const code = char.charCodeAt(0);
-        // Only allow printable ASCII (32-126) and common whitespace (9, 10, 13)
-        if ((code >= 32 && code <= 126) || code === 9 || code === 10 || code === 13) {
-          return char;
-        }
-        return '';
-      }).join('');
+      // Single sanitization for draw (wrapTextToLines already sanitizes; one pass at draw for consistency)
+      const finalLine = sanitizeForWinAnsi(wrappedLine);
       
       if (finalLine.trim().length > 0) {
         try {
@@ -838,7 +792,7 @@ export async function generateUSCISPdf(text: string, skipSignature: boolean = fa
           const isLastLineOfParagraph = lineIndex === allWrappedLines.length - 1;
           
           // Don't justify: headings, header lines, last line of paragraph, or exhibit list items
-          if (!isHeading && !lineIsHeader && !isLastLineOfParagraph && !isExhibitListItem) {
+          if (!isHeading && !lineIsHeader && !isLastLineOfParagraph && !isExhibitListItem && shouldJustifyParagraph) {
             textToDraw = justifyLine(finalLine, currentFont, FONT_SIZE, maxWidth);
           }
           
@@ -856,14 +810,11 @@ export async function generateUSCISPdf(text: string, skipSignature: boolean = fa
       y -= LINE_HEIGHT;
     }
     
-    // Add spacing between paragraphs only if paragraph has minimum lines
-    // But don't add extra spacing after header paragraphs
+    // Double spacing after paragraphs (body); single after headers
     if (paraIndex < paragraphs.length - 1) {
-      if (paragraphLineCount >= MIN_LINES_PER_PARAGRAPH && !isHeader) {
-        // Paragraph has enough lines and is not header, add spacing (2x LINE_HEIGHT) between paragraphs
-        y -= LINE_HEIGHT * 2;
+      if (!isHeader) {
+        y -= LINE_HEIGHT * 3;
       } else {
-        // Paragraph is too short or is header, add minimal spacing (1x LINE_HEIGHT)
         y -= LINE_HEIGHT;
       }
       

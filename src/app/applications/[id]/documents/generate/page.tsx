@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -11,20 +11,22 @@ import {
   CheckCircle2,
   Edit,
   Download,
-  RefreshCw,
   AlertCircle,
+  Save,
 } from "lucide-react";
 import {
   generateCoverLetter,
   generatePersonalStatement,
   generateExhibitList,
   getGeneratedDocuments,
-  generateCoverLetterPdfAction,
   generateCombinedPdf,
+  updateGeneratedDocumentContent,
 } from "@/app/actions/generate-documents";
+import { fillI539FormAction, getI539FillGuideAction } from "@/app/actions/fill-i539";
 import { getApplicationCaseId } from "@/app/actions/application";
 import { buildUrlWithCaseId } from "@/lib/utils";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
+import { TiptapEditor } from "@/components/TiptapEditor";
 
 type DocumentType = 
   | "cover_letter"
@@ -65,9 +67,10 @@ const generationFunctions: Record<DocumentType, (id: string) => Promise<any>> = 
   exhibit_list: generateExhibitList,
 };
 
-export default function GenerateDocumentsPage() {
+function GenerateDocumentsContent() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const applicationId = params.id as string;
 
   const [generatedDocuments, setGeneratedDocuments] = useState<
@@ -90,14 +93,37 @@ export default function GenerateDocumentsPage() {
   const [viewing, setViewing] = useState<DocumentType | null>(null);
   const [loading, setLoading] = useState(true);
   const [generatingCombinedPdf, setGeneratingCombinedPdf] = useState(false);
+  const [generatingI539, setGeneratingI539] = useState(false);
+  const [generatingI539Guide, setGeneratingI539Guide] = useState(false);
+  const [i539Feedback, setI539Feedback] = useState<string | null>(null);
   const [caseId, setCaseId] = useState<string | null>(null);
   const [generatingAll, setGeneratingAll] = useState(false);
   const [generationStep, setGenerationStep] = useState<DocumentType | null>(null);
+  const [editedDraft, setEditedDraft] = useState<Record<DocumentType, string | null>>({
+    cover_letter: null,
+    personal_statement: null,
+    exhibit_list: null,
+  });
+  const [savingDoc, setSavingDoc] = useState<DocumentType | null>(null);
+  const [editorRefreshKey, setEditorRefreshKey] = useState<Record<DocumentType, number>>({
+    cover_letter: 0,
+    personal_statement: 0,
+    exhibit_list: 0,
+  });
 
   useEffect(() => {
     loadGeneratedDocuments();
     loadCaseId();
   }, [applicationId]);
+
+  // Open editor when arriving with ?edit=cover_letter|personal_statement|exhibit_list
+  useEffect(() => {
+    if (loading) return;
+    const edit = searchParams.get("edit") as DocumentType | null;
+    if (edit && ["cover_letter", "personal_statement", "exhibit_list"].includes(edit) && generatedDocuments[edit]) {
+      setViewing(edit);
+    }
+  }, [loading, searchParams, generatedDocuments]);
   
   async function loadCaseId() {
     const result = await getApplicationCaseId(applicationId);
@@ -131,27 +157,6 @@ export default function GenerateDocumentsPage() {
       console.error("Error loading generated documents:", error);
     } finally {
       setLoading(false);
-    }
-  }
-
-  async function handleGenerate(documentType: DocumentType) {
-    setGenerating((prev) => ({ ...prev, [documentType]: true }));
-    setErrors((prev) => ({ ...prev, [documentType]: null }));
-
-    try {
-      const generateFn = generationFunctions[documentType];
-      const result = await generateFn(applicationId);
-
-      if (result.success && result.content) {
-        await loadGeneratedDocuments();
-        setViewing(documentType);
-      } else {
-        setErrors((prev) => ({ ...prev, [documentType]: result.error || "Falha ao gerar documento" }));
-      }
-    } catch (error: any) {
-      setErrors((prev) => ({ ...prev, [documentType]: error.message || "Ocorreu um erro" }));
-    } finally {
-      setGenerating((prev) => ({ ...prev, [documentType]: false }));
     }
   }
 
@@ -194,40 +199,22 @@ export default function GenerateDocumentsPage() {
     setGeneratingAll(false);
   }
 
-  function handleDownload(documentType: DocumentType) {
-    const doc = generatedDocuments[documentType];
-    if (!doc) return;
-
-    const blob = new Blob([doc.content], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${mainDocumentTypes.find((d) => d.type === documentType)?.title || documentType}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }
-
-  async function handleDownloadPdf() {
+  async function handleSaveDocument(documentType: DocumentType) {
+    const value = editedDraft[documentType] ?? generatedDocuments[documentType]?.content ?? "";
+    setSavingDoc(documentType);
     try {
-      const result = await generateCoverLetterPdfAction(applicationId);
-      
-      if (result.success && result.pdfBytes) {
-        const blob = new Blob([result.pdfBytes as any], { type: "application/pdf" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "cover-letter.pdf";
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+      const result = await updateGeneratedDocumentContent(applicationId, documentType, value);
+      if (result.success) {
+        await loadGeneratedDocuments();
+        setEditedDraft((prev) => ({ ...prev, [documentType]: null }));
+        setEditorRefreshKey((prev) => ({ ...prev, [documentType]: (prev[documentType] ?? 0) + 1 }));
       } else {
-        alert(result.error || "Falha ao gerar PDF");
+        alert(result.error || "Falha ao salvar");
       }
-    } catch (error: any) {
-      alert(error.message || "Ocorreu um erro ao gerar PDF");
+    } catch (e: any) {
+      alert(e?.message || "Erro ao salvar");
+    } finally {
+      setSavingDoc(null);
     }
   }
 
@@ -267,6 +254,64 @@ export default function GenerateDocumentsPage() {
       alert(errorMessage);
     } finally {
       setGeneratingCombinedPdf(false);
+    }
+  }
+
+  async function handleDownloadI539() {
+    try {
+      setGeneratingI539(true);
+      setI539Feedback(null);
+      const result = await fillI539FormAction(applicationId);
+      if (result.success && result.pdfBytes) {
+        const blob = new Blob([result.pdfBytes as any], { type: "application/pdf" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "i-539.pdf";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        if (result.filled === false) {
+          setI539Feedback("I-539 em branco. Use o guia de preenchimento para preencher à mão.");
+          alert("O I-539 não pôde ser preenchido automaticamente. Baixe o guia de preenchimento e use os valores para preencher o formulário em uscis.gov/i-539.");
+        } else {
+          setI539Feedback("I-539 preenchido e baixado com sucesso.");
+          setTimeout(() => setI539Feedback(null), 4000);
+        }
+      } else {
+        setI539Feedback(null);
+        alert(result.error || "Falha ao gerar I-539.");
+      }
+    } catch (e: any) {
+      setI539Feedback(null);
+      alert(e?.message || "Erro ao gerar I-539.");
+    } finally {
+      setGeneratingI539(false);
+    }
+  }
+
+  async function handleDownloadI539Guide() {
+    try {
+      setGeneratingI539Guide(true);
+      const result = await getI539FillGuideAction(applicationId);
+      if (result.success && result.html) {
+        const blob = new Blob([result.html], { type: "text/html;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "i-539-guia.html";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } else {
+        alert(result.error || "Falha ao gerar o guia.");
+      }
+    } catch (e: any) {
+      alert(e?.message || "Erro ao gerar o guia.");
+    } finally {
+      setGeneratingI539Guide(false);
     }
   }
 
@@ -412,6 +457,49 @@ export default function GenerateDocumentsPage() {
         </div>
       )}
 
+      {/* Formulário I-539 - sempre visível */}
+      <div className="mb-8 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-6 shadow-sm">
+        <div className="flex items-center justify-between flex-wrap gap-4">
+          <div>
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
+              Formulário I-539
+            </h2>
+            <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
+              Formulário em PDF (pode vir em branco) e guia com os valores para preencher à mão em uscis.gov/i-539
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={handleDownloadI539}
+              disabled={generatingI539}
+              className="inline-flex items-center gap-2 rounded-lg border-2 border-gray-900 dark:border-white bg-gray-900 dark:bg-white text-white dark:text-gray-900 px-4 py-2.5 text-sm font-semibold transition-all hover:bg-gray-800 dark:hover:bg-gray-100 disabled:opacity-50"
+            >
+              {generatingI539 ? (
+                <><Loader2 className="h-4 w-4 animate-spin" /> Gerando...</>
+              ) : (
+                <><Download className="h-4 w-4" /> Baixar I-539</>
+              )}
+            </button>
+            <button
+              onClick={handleDownloadI539Guide}
+              disabled={generatingI539Guide}
+              className="inline-flex items-center gap-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 px-4 py-2.5 text-sm font-medium transition-all hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+            >
+              {generatingI539Guide ? (
+                <><Loader2 className="h-4 w-4 animate-spin" /> Gerando...</>
+              ) : (
+                <><FileText className="h-4 w-4" /> Guia de preenchimento</>
+              )}
+            </button>
+          </div>
+        </div>
+        {i539Feedback && (
+          <p className={`mt-2 text-sm ${i539Feedback.startsWith("I-539 em branco") ? "text-amber-600 dark:text-amber-400" : "text-green-600 dark:text-green-400"}`}>
+            {i539Feedback}
+          </p>
+        )}
+      </div>
+
       {/* Combined PDF Section - Only show when all 3 are generated */}
       {allDocumentsGenerated && (
         <div className="mb-8 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-6 shadow-sm">
@@ -450,7 +538,6 @@ export default function GenerateDocumentsPage() {
         <div className="space-y-4">
           {mainDocumentTypes.map((docInfo) => {
             const isGenerated = generatedDocuments[docInfo.type] !== null;
-            const isGenerating = generating[docInfo.type];
             const error = errors[docInfo.type];
 
             return (
@@ -486,72 +573,45 @@ export default function GenerateDocumentsPage() {
                   </div>
                   <div className="flex gap-2">
                     {isGenerated && (
-                      <>
-                        <button
-                          onClick={() => setViewing(viewing === docInfo.type ? null : docInfo.type)}
-                          className="inline-flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800"
-                        >
-                          <Edit className="h-4 w-4" />
-                          {viewing === docInfo.type ? "Ocultar" : "Ver"}
-                        </button>
-                        {docInfo.type === "cover_letter" ? (
-                          <>
-                            <button
-                              onClick={handleDownloadPdf}
-                              className="inline-flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800"
-                            >
-                              <Download className="h-4 w-4" />
-                              Baixar PDF
-                            </button>
-                            <button
-                              onClick={() => handleDownload(docInfo.type)}
-                              className="inline-flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800"
-                            >
-                              <Download className="h-4 w-4" />
-                              Baixar TXT
-                            </button>
-                          </>
-                        ) : (
-                          <button
-                            onClick={() => handleDownload(docInfo.type)}
-                            className="inline-flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800"
-                          >
-                            <Download className="h-4 w-4" />
-                            Baixar
-                          </button>
-                        )}
-                      </>
+                      <button
+                        onClick={() => setViewing(viewing === docInfo.type ? null : docInfo.type)}
+                        className="inline-flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800"
+                      >
+                        <Edit className="h-4 w-4" />
+                        {viewing === docInfo.type ? "Fechar editor" : "Editar"}
+                      </button>
                     )}
-                    <button
-                      onClick={() => handleGenerate(docInfo.type)}
-                      disabled={isGenerating || generatingAll}
-                      className="inline-flex items-center gap-2 rounded-lg border-2 border-gray-900 dark:border-white bg-gray-900 dark:bg-white text-white dark:text-gray-900 px-4 py-2 text-sm font-semibold transition-all hover:bg-gray-800 dark:hover:bg-gray-100 disabled:opacity-50"
-                    >
-                      {isGenerating ? (
-                        <>
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                          Gerando...
-                        </>
-                      ) : isGenerated ? (
-                        <>
-                          <RefreshCw className="h-4 w-4" />
-                          Regenerar
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles className="h-4 w-4" />
-                          Gerar
-                        </>
-                      )}
-                    </button>
                   </div>
                 </div>
 
-                {/* Document Preview */}
+                {/* Document editor (Tiptap) */}
                 {viewing === docInfo.type && generatedDocuments[docInfo.type] && (
-                  <div className="mt-4 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 p-4">
-                    <div className="max-h-96 overflow-y-auto whitespace-pre-wrap text-sm text-gray-900 dark:text-gray-100">
-                      {generatedDocuments[docInfo.type]?.content}
+                  <div className="mt-4 space-y-3">
+                    <TiptapEditor
+                      key={`${docInfo.type}-${editorRefreshKey[docInfo.type] ?? 0}`}
+                      content={editedDraft[docInfo.type] ?? generatedDocuments[docInfo.type]?.content ?? ""}
+                      onChange={(plain) => setEditedDraft((prev) => ({ ...prev, [docInfo.type]: plain }))}
+                      minHeight={280}
+                      applicationId={applicationId}
+                    />
+                    <div className="flex justify-end">
+                      <button
+                        onClick={() => handleSaveDocument(docInfo.type)}
+                        disabled={savingDoc === docInfo.type}
+                        className="inline-flex items-center gap-2 rounded-lg border-2 border-gray-900 dark:border-white bg-gray-900 dark:bg-white text-white dark:text-gray-900 px-4 py-2 text-sm font-semibold transition-all hover:bg-gray-800 dark:hover:bg-gray-100 disabled:opacity-50"
+                      >
+                        {savingDoc === docInfo.type ? (
+                          <>
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            Salvando...
+                          </>
+                        ) : (
+                          <>
+                            <Save className="h-4 w-4" />
+                            Salvar alterações
+                          </>
+                        )}
+                      </button>
                     </div>
                   </div>
                 )}
@@ -593,5 +653,22 @@ export default function GenerateDocumentsPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function GenerateDocumentsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-screen items-center justify-center bg-white dark:bg-gray-900">
+          <div className="text-center">
+            <Loader2 className="h-8 w-8 animate-spin text-gray-900 dark:text-white mx-auto" />
+            <p className="mt-4 text-gray-600 dark:text-gray-400">Carregando...</p>
+          </div>
+        </div>
+      }
+    >
+      <GenerateDocumentsContent />
+    </Suspense>
   );
 }

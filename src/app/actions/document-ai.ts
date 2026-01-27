@@ -683,6 +683,14 @@ function extractPassportData(aiResponse: any): ExtractedPassportData {
             case "passportnumber":
             case "passport_number":
             case "passportno":
+            case "passportnum":
+            case "passport_num":
+            case "passport_no":
+            case "documentnumber":
+            case "document_number":
+            case "doc_number":
+            case "docnumber":
+            case "docno":
               extracted.passportNumber = value;
               break;
             case "dateofbirth":
@@ -728,10 +736,15 @@ function extractPassportData(aiResponse: any): ExtractedPassportData {
 
     // Also check for properties in the document if entities aren't available
     if (Object.keys(extracted).length === 0 && aiResponse.document?.text) {
-      // Fallback: try to extract from full text if structured entities aren't available
-      // This is a basic fallback - you may want to enhance this based on your extractor
       const text = aiResponse.document.text;
       extracted.rawText = text;
+    }
+
+    // Se não encontrou passportNumber em entities, tenta extrair de rawText/text com regex
+    if (!extracted.passportNumber) {
+      const text = extracted.rawText || aiResponse.document?.text || "";
+      const m = text.match(/(?:passport|document|doc\.?)\s*(?:number|#|no\.?)?\s*:?\s*([A-Z0-9]{5,12})/i);
+      if (m?.[1]) extracted.passportNumber = m[1];
     }
 
     // Note: _rawResponse is not stored here to avoid database size issues

@@ -20,6 +20,7 @@ import {
   DollarSign,
   Building,
   FolderOpen,
+  Edit,
 } from "lucide-react";
 import { getApplicationReview } from "@/app/actions/application-review";
 import { exportApplicationAsDocx } from "@/app/actions/export-application";
@@ -384,23 +385,34 @@ export default function ReviewApplicationPage() {
                       </p>
                     </div>
                   </div>
-                  <button
-                    onClick={() => {
-                      const blob = new Blob([doc.content], { type: "text/plain" });
-                      const url = URL.createObjectURL(blob);
-                      const a = document.createElement("a");
-                      a.href = url;
-                      a.download = `${getDocumentTypeLabel(doc.document_type)}.txt`;
-                      document.body.appendChild(a);
-                      a.click();
-                      document.body.removeChild(a);
-                      URL.revokeObjectURL(url);
-                    }}
-                    className="inline-flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800"
-                  >
-                    <Download className="h-4 w-4" />
-                    Baixar
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {["cover_letter", "personal_statement", "exhibit_list"].includes(doc.document_type) && (
+                      <Link
+                        href={buildUrlWithCaseId(`/applications/${applicationId}/documents/generate?edit=${doc.document_type}`, caseId)}
+                        className="inline-flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800"
+                      >
+                        <Edit className="h-4 w-4" />
+                        Editar
+                      </Link>
+                    )}
+                    <button
+                      onClick={() => {
+                        const blob = new Blob([doc.content], { type: "text/plain" });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = `${getDocumentTypeLabel(doc.document_type)}.txt`;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                      }}
+                      className="inline-flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800"
+                    >
+                      <Download className="h-4 w-4" />
+                      Baixar
+                    </button>
+                  </div>
                 </div>
                 <div className="max-h-64 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 p-4">
                   <pre className="whitespace-pre-wrap text-sm text-gray-900 dark:text-gray-100 font-mono">
